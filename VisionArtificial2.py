@@ -12,7 +12,7 @@ if frame is None:
     raise FileNotFoundError("No se pudo leer la imagen, revisa la ruta.")
 
 # === Cargar el modelo YOLO ===
-model = YOLO("ProyectoDAPCTER/best.pt")
+model = YOLO("best.pt")
 
 classNames = ["Panel-Hotspots"]
 
@@ -22,6 +22,7 @@ os.makedirs(output_dir, exist_ok=True)
 # === Procesar la imagen ===
 results = model(frame, stream=True)
 
+count=0
 for res in results:
     boxes = res.boxes
     if boxes is None or len(boxes) == 0:
@@ -41,12 +42,13 @@ for res in results:
 
         # Paso 2: Media y máscara
         mean_val = np.mean(gray_roi)
-        mask = gray_roi > mean_val+100
+        num_pixels = np.sum(gray_roi > mean_val+50)
 
         # Paso 3: Guardar si hay píxeles mayores a la media
-        if np.any(mask):
-            filename = f"{output_dir}/{label}_{int(time.time()*1000)}.jpg"
+        if num_pixels >= 100:
+            filename = f"{output_dir}/{label}_{int(count)}.jpg"
             cv2.imwrite(filename, roi)
+            count+=1
 
     
     for box in boxes:
