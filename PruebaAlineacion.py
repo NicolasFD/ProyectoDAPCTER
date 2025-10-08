@@ -34,6 +34,11 @@ else:
         max_val = np.max(gray)
         diff_max_mean = max_val - mean_val  # diferencia
 
+        alto, ancho, canales = img.shape
+
+        print(f"Ancho: {ancho}px, Alto: {alto}px, Canales: {canales}")
+        print(f"Tamaño total de píxeles: {img.size}")
+
         print(f"{nombre}  -->  Media: {mean_val:.2f}  "
               f"Mínimo: {min_val}  Máximo: {max_val}  "
               f"Dif(Max-Media): {diff_max_mean:.2f}")

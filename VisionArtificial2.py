@@ -2,11 +2,10 @@ import cv2
 from ultralytics import YOLO
 import numpy as np
 import os
-import time
 
 # === Cargar imagen de prueba ===
-imagen_path = "031R.jpg"   # pon aquí el nombre de tu archivo
-frame = cv2.imread("031R.jpg")
+imagen_path = "ImagenesPruebas/002R.jpg"   # pon aquí el nombre de tu archivo
+frame = cv2.imread(imagen_path)
 
 if frame is None:
     raise FileNotFoundError("No se pudo leer la imagen, revisa la ruta.")
@@ -42,13 +41,19 @@ for res in results:
 
         # Paso 2: Media y máscara
         mean_val = np.mean(gray_roi)
-        num_pixels = np.sum(gray_roi > mean_val+50)
+        num_pixels = np.sum(gray_roi > mean_val+36)
+        #mask=gray_roi > mean_val
 
         # Paso 3: Guardar si hay píxeles mayores a la media
-        if num_pixels >= 100:
+        if num_pixels >= 100 and roi.size>2000:
             filename = f"{output_dir}/{label}_{int(count)}.jpg"
             cv2.imwrite(filename, roi)
             count+=1
+        
+        #if np.any(mask):
+            #filename = f"{output_dir}/{label}_{int(count)}.jpg"
+            #cv2.imwrite(filename, roi)
+            #count+=1
 
     
     for box in boxes:
