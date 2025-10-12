@@ -1,34 +1,31 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from scipy.signal import convolve2d
 import os
 
-# === CONFIGURACIÓN GENERAL ===
+# Carpeta donde están las imágenes guardadas por el script anterior
 input_dir = "ImagenesPruebas"
-output_dir = "detecciones_hotspots"
-os.makedirs(output_dir, exist_ok=True)
 
 # Verificar carpeta
 if not os.path.exists(input_dir):
     raise FileNotFoundError(f"No existe la carpeta {input_dir}")
 
-# Cargar modelo YOLO
-model = YOLO("best.pt")
-classNames = ["Panel-Hotspots"]
-
-# === PARÁMETROS DE DETECCIÓN DE HOTSPOTS ===
-THRESHOLD_RELATIVO = 0.25   # 25% sobre la media de intensidad
-AREA_MINIMA = 30            # área mínima en píxeles
-BLUR = 5                    # suavizado para eliminar ruido
-
-# === PROCESAMIENTO DE IMÁGENES ===
+# Obtener lista de imágenes
 imagenes = [f for f in os.listdir(input_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+
+# === PARÁMETROS ===
+INTENSIDAD_UMBRAL = 45
+VECINDAD = 5   # Tamaño de la ventana (ej. 3x3 o 5x5)
+
+# Crear kernel de suma local (filtro de vecindad)
+kernel = np.ones((VECINDAD, VECINDAD), np.float32)
 
 if not imagenes:
     print("No hay imágenes en la carpeta.")
 else:
-    count = 0
+    count=0
     for nombre in imagenes:
         ruta = os.path.join(input_dir, nombre)
         frame = cv2.imread(ruta)
@@ -36,9 +33,18 @@ else:
             print(f"No se pudo leer {nombre}")
             continue
 
-        # --- Paso 1: detección con YOLO ---
+            # === Cargar el modelo YOLO ===
+        model = YOLO("best.pt")
+
+        classNames = ["Panel-Hotspots"]
+
+        output_dir = "detecciones_guardadas"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # === Procesar la imagen ===
         results = model(frame, stream=True)
 
+        
         for res in results:
             boxes = res.boxes
             if boxes is None or len(boxes) == 0:
@@ -47,39 +53,72 @@ else:
             for box in boxes:
                 x1, y1, x2, y2 = box.xyxy[0]
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
                 conf = float(box.conf[0])
                 cls = int(box.cls[0])
                 label = classNames[cls] if cls < len(classNames) else f"Class {cls}"
 
-                # --- Paso 2: análisis de hotspot dentro del ROI detectado ---
-                roi = frame[y1:y2, x1:x2]
-                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                blurred = cv2.GaussianBlur(gray, (BLUR, BLUR), 0)
+                # Paso 1: Matriz de valores
+                roi = frame[y1:y2,x1:x2]
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-                mean_intensity = np.mean(blurred)
-                threshold_value = mean_intensity + THRESHOLD_RELATIVO * (255 - mean_intensity)
-                _, mask = cv2.threshold(blurred, threshold_value, 255, cv2.THRESH_BINARY)
+                resultado = convolve2d(gray_roi, kernel, mode='same', boundary='fill', fillvalue=0)
 
-                # Filtrar ruido pequeño
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+                # Paso 2: Media y máscara
+                mean_val = np.mean(resultado)
+                num_pixels = np.sum(resultado > mean_val+1000)
+                #mask=gray_roi > mean_val
 
-                hotspots = 0
-                for i in range(1, num_labels):
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    if area >= AREA_MINIMA:
-                        x, y, w, h = stats[i, :4]
-                        cv2.rectangle(roi, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                        hotspots += 1
-
-                if hotspots > 0:
-                    filename = f"{output_dir}/{label}_{count}_hotspot.jpg"
+                # Paso 3: Guardar si hay píxeles mayores a la media
+                if num_pixels >= 200 and x2-x1>30 and y2-y1>30:
+                    filename = f"{output_dir}/{label}_{int(count)}.jpg"
                     cv2.imwrite(filename, roi)
-                    count += 1
+                    count+=1
+                
+                #if np.any(mask):
+                    #filename = f"{output_dir}/{label}_{int(count)}.jpg"
+                    #cv2.imwrite(filename, roi)
+                    #count+=1
 
-        # --- Guardar imagen final con anotaciones ---
-        out_path = os.path.join(output_dir, f"resultado_{nombre}")
-        cv2.imwrite(out_path, frame)
-        print(f"Procesada: {nombre}")
 
-print("\n✅ Proceso terminado. Resultados guardados en:", output_dir)
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0]
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+                conf = float(box.conf[0])
+                cls = int(box.cls[0])
+                label = classNames[cls] if cls < len(classNames) else f"Class {cls}"
+
+                # Paso 1: Matriz de valores
+                roi = frame[y1:y2,x1:x2]
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+                # Paso 2: Media y máscara
+                mean_val = np.mean(gray_roi)
+                mask = gray_roi > mean_val
+
+                #Dibujar bounding box
+                text = f"{label} {conf:.2f} Mean:{mean_val:.1f}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (255, 0, 0), 2)
+
+        # Mostrar la imagen con detecciones
+        
+        
+        
+print("\nProceso terminado.")
+
+import cv2
+import numpy as np
+
+matriz = np.array([
+    [1, 2, 3],
+    [0, 5, 1],
+    [4, 2, 0]
+], dtype=np.float32)
+
+kernel = np.ones((3, 3), np.float32)  # ventana 3x3
+resultado = cv2.filter2D(matriz, -1, kernel)
+
+print(resultado)
