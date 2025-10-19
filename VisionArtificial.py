@@ -1,68 +1,82 @@
+import streamlit as st
 import cv2
-import numpy as np
-from ultralytics import YOLO
 import os
+from datetime import datetime
+from PIL import Image
+import numpy as np
 
-# === CONFIGURACIÓN ===
-input_dir = "ImagenesPruebas"
-output_dir = "manchas_detectadas"
-os.makedirs(output_dir, exist_ok=True)
+# === CONFIGURACIÓN GENERAL ===
+st.set_page_config(page_title="DAPCTER", page_icon="🛰️", layout="wide")
 
-# Cargar modelo YOLO
-model = YOLO("best.pt")  # puedes cambiar al tuyo entrenado
+st.title("DAPCTER - Sistema de Detección y Procesamiento Aéreo")
+st.write("Aplicación para conectar, capturar y procesar imágenes térmicas de paneles solares.")
 
-# === PARÁMETROS ===
-INTENSIDAD_UMBRAL = 45
-VECINDAD = 5   # Tamaño de la ventana (ej. 3x3 o 5x5)
+# === MENÚ DE PESTAÑAS ===
+tabs = st.tabs(["Conexión", "Vuelo", "Procesamiento"])
 
-# Crear kernel de suma local (filtro de vecindad)
-kernel = np.ones((VECINDAD, VECINDAD), np.float32)
+# ===============================================================
+# 1️⃣ Pestaña de Conexión
+# ===============================================================
+with tabs[0]:
+    st.header("Conexión del Sistema")
+    st.markdown("""
+    En esta sección puedes conectar el transmisor con la cámara y realizar una prueba de video.
+    """)
 
-# === PROCESAMIENTO DE IMÁGENES ===
-for filename in os.listdir(input_dir):
-    if not filename.lower().endswith((".jpg", ".png", ".jpeg")):
-        continue
+    iniciar = st.button("Iniciar conexión")
+    if iniciar:
+        st.success("Transmisor conectado correctamente.")
+        st.info("La cámara está lista para transmitir video.")
 
-    path = os.path.join(input_dir, filename)
-    img = cv2.imread(path)
-    if img is None:
-        print(f"No se pudo cargar {filename}")
-        continue
+    # Simulación de vista previa
+    camara_activa = st.checkbox("Mostrar vista previa de cámara")
+    if camara_activa:
+        st.image("https://via.placeholder.com/640x360?text=Vista+Previa+de+la+Cámara",
+                 caption="Simulación de transmisión")
 
-    # Detección YOLO
-    results = model(img, verbose=False)
-    detections = results[0].boxes.xyxy.cpu().numpy().astype(int)
+# ===============================================================
+# 2️⃣ Pestaña de Vuelo
+# ===============================================================
+with tabs[1]:
+    st.header("Vuelo y Captura de Imágenes")
 
-    # Convertir a escala de grises
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Visualización en vivo")
+        st.image("https://via.placeholder.com/640x360?text=Cámara+en+vivo")
 
-    # Aplicar convolución local (suma de vecindad)
-    suma_local = cv2.filter2D(gray, -1, kernel)
+        if st.button("Tomar captura"):
+            fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.success(f"Captura guardada como captura_{fecha}.jpg")
 
-    # Normalizar el resultado a 0-255
-    suma_local_norm = cv2.normalize(suma_local, None, 0, 255, cv2.NORM_MINMAX)
+    with col2:
+        st.subheader("Revisión de capturas")
+        uploaded_files = st.file_uploader("Importar capturas", type=["jpg", "png"], accept_multiple_files=True)
 
-    # Generar mapa binario de puntos calientes
-    umbral = np.mean(suma_local_norm) + np.std(suma_local_norm)
-    puntos_calientes = (suma_local_norm > umbral).astype(np.uint8) * 255
+        if uploaded_files:
+            for img_file in uploaded_files:
+                img = Image.open(img_file)
+                st.image(img, caption=f"Imagen: {img_file.name}", use_container_width=True)
 
-    # Dibujar detecciones YOLO y extraer regiones calientes
-    for i, (x1, y1, x2, y2) in enumerate(detections):
-        roi = puntos_calientes[y1:y2, x1:x2]
-        if roi.size == 0:
-            continue
+    st.info("Cuando termines de revisar, pasa a la pestaña de procesamiento.")
 
-        # Si hay una mancha caliente significativa dentro
-        if np.mean(roi) > INTENSIDAD_UMBRAL:
-            recorte = img[y1:y2, x1:x2]
-            output_path = os.path.join(output_dir, f"{filename}_mancha_{i}.png")
-            cv2.imwrite(output_path, recorte)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+# ===============================================================
+# 3️⃣ Pestaña de Procesamiento
+# ===============================================================
+with tabs[2]:
+    st.header("Procesamiento de Imágenes")
 
-    # Guardar imagen con resultados visuales
-    resultado_path = os.path.join(output_dir, f"{filename}_resultado.png")
-    cv2.imwrite(resultado_path, img)
+    st.markdown("Sube tus imágenes para procesarlas y generar el reporte en PDF.")
 
-    print(f"Procesada: {filename}")
+    uploaded_files_proc = st.file_uploader("Seleccionar imágenes a procesar", type=["jpg", "png"], accept_multiple_files=True)
 
-print("✅ Procesamiento completado con realce de puntos calientes.")
+    if st.button("Iniciar procesamiento"):
+        if uploaded_files_proc:
+            progress = st.progress(0)
+            for i, img_file in enumerate(uploaded_files_proc):
+                # Simulación del procesamiento
+                progress.progress((i + 1) / len(uploaded_files_proc))
+            st.success("Procesamiento finalizado")
+            st.download_button("Descargar reporte PDF", "Reporte_DAPCTER.pdf")
+        else:
+            st.warning("Por favor sube imágenes antes de procesar.")
