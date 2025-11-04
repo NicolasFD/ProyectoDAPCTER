@@ -6,7 +6,7 @@ from datetime import datetime
 from scipy.signal import convolve2d
 
 # === CONFIGURACIÓN ===
-input_dir = "ImagenesPruebas"
+input_dir = "Pruebas"
 ruta_base = "C:/DAPCTER/ProyectoDAPCTER"
 fecha_hoy = datetime.now().strftime("%Y-%m-%d")
 ruta_carpeta = os.path.join(ruta_base, fecha_hoy)

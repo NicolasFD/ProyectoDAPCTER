@@ -1,82 +1,229 @@
+import streamlit as st
 import cv2
-import numpy as np
-from ultralytics import YOLO
 import os
 from datetime import datetime
-from scipy.signal import convolve2d
+from PIL import Image
+import numpy as np
+import fpdf as FPDF
 
-# === CONFIGURACIÓN ===
-input_dir = "ImagenesPruebas"
-ruta_base = "C:/DAPCTER/ProyectoDAPCTER"
-fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-ruta_carpeta = os.path.join(ruta_base, fecha_hoy)
+# === CONFIGURACIÓN GENERAL ===
+st.set_page_config(page_title="DAPCTER", page_icon="🛰️", layout="wide")
 
-output_dir_HS = os.path.join(ruta_carpeta, "Paneles_HS")
-output_dir_OK = os.path.join(ruta_carpeta, "Paneles_Sanos")
-os.makedirs(output_dir_HS, exist_ok=True)
-os.makedirs(output_dir_OK, exist_ok=True)
+st.title("DAPCTER - Sistema de Detección y Procesamiento Aéreo")
+st.write("Aplicación para conectar, capturar y procesar imágenes térmicas de paneles solares.")
 
-INTENSIDAD_UMBRAL = 45
-VECINDAD = 5
-kernel = np.ones((VECINDAD, VECINDAD), np.float32)
+# === MENÚ DE PESTAÑAS ===
+tabs = st.tabs(["Conexión", "Vuelo", "Procesamiento"])
 
-# === Verificación inicial ===
-if not os.path.exists(input_dir):
-    raise FileNotFoundError(f"No existe la carpeta {input_dir}")
+# ===============================================================
+# 1️⃣ Pestaña de Conexión
+# ===============================================================
+with tabs[0]:
+    st.header("Conexión del Sistema")
+    st.markdown("Conecta el transmisor y verifica la cámara en tiempo real.")
 
-imagenes = [
-    os.path.join(input_dir, f)
-    for f in os.listdir(input_dir)
-    if f.lower().endswith((".jpg", ".jpeg", ".png"))
-]
+    iniciar = st.button("Iniciar conexión")
+    camara_activa = st.checkbox("Mostrar vista previa de cámara")
 
-if not imagenes:
-    print("No hay imágenes en la carpeta.")
-    exit()
+    # --- Estado de conexión ---
+    if iniciar:
+        st.success("✅ Transmisor conectado correctamente.")
+        st.info("La cámara está lista para transmitir video.")
 
-# === Cargar el modelo YOLO una sola vez ===
-model = YOLO("best.pt")
-classNames = ["Panel-Hotspots"]
+    # --- Vista previa (cámara local) ---
+    if camara_activa:
+        stframe = st.empty()
+        cap = cv2.VideoCapture(0)  # Cámara 0 (ajustar si hay varias)
+        cap.set(3, 640)
+        cap.set(4, 480)
 
-# === Procesamiento ===
-countHS, countOK = 0, 0
+        st.write("Presiona **Detener vista previa** para salir.")
+        stop_button = st.button("Detener vista previa")
 
-for ruta in imagenes:
-    frame = cv2.imread(ruta)
-    if frame is None:
-        print(f"No se pudo leer {os.path.basename(ruta)}")
-        continue
+        while cap.isOpened() and not stop_button:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("No se pudo acceder a la cámara.")
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            stframe.image(frame_rgb, channels="RGB", caption="Vista previa en tiempo real")
+            stop_button = st.button("Detener vista previa")  # actualiza estado
+        cap.release()
+        st.write("📷 Vista previa detenida.")
 
-    # Procesar con YOLO
-    results = model(frame, verbose=False)
-    for res in results:
-        for box in res.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
-            label = classNames[cls] if cls < len(classNames) else f"Class {cls}"
+# ===============================================================
+# 2️⃣ Pestaña de Vuelo
+# ===============================================================
+with tabs[1]:
+    st.header("Vuelo y Captura de Imágenes")
 
-            # === Recorte de ROI ===
-            roi = frame[y1:y2, x1:x2]
-            if roi.size == 0:
+    col1, col2 = st.columns(2)
+
+    # --- Visualización en vivo ---
+    with col1:
+        st.subheader("Cámara en vivo")
+        iniciar_vuelo = st.checkbox("Activar cámara en vuelo")
+
+        if iniciar_vuelo:
+            stframe2 = st.empty()
+            cap2 = cv2.VideoCapture(0)
+            cap2.set(3, 640)
+            cap2.set(4, 480)
+
+            if not cap2.isOpened():
+                st.error("❌ No se pudo iniciar la cámara.")
+            else:
+                st.info("🛫 Cámara en vuelo activa. Pulsa 'Tomar captura' para guardar imágenes.")
+
+                captura_boton = st.button("Tomar captura")
+                detener_vuelo = st.button("Detener cámara")
+
+                while cap2.isOpened() and not detener_vuelo:
+                    ret, frame2 = cap2.read()
+                    if not ret:
+                        break
+                    frame_rgb2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)
+                    stframe2.image(frame_rgb2, channels="RGB", caption="Transmisión en vivo")
+                    detener_vuelo = st.button("Detener cámara")
+
+                    # --- Captura ---
+                    if captura_boton:
+                        fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        carpeta = "Capturas"
+                        os.makedirs(carpeta, exist_ok=True)
+                        filename = os.path.join(carpeta, f"captura_{fecha}.jpg")
+                        cv2.imwrite(filename, frame2)
+                        st.success(f"📸 Captura guardada como {filename}")
+                        captura_boton = False
+                cap2.release()
+                st.write("📴 Cámara detenida.")
+
+    # --- Revisión de capturas ---
+    with col2:
+        st.subheader("Revisión de capturas previas")
+        uploaded_files = st.file_uploader("Importar capturas", type=["jpg", "png"], accept_multiple_files=True)
+
+        if uploaded_files:
+            for img_file in uploaded_files:
+                img = Image.open(img_file)
+                st.image(img, caption=f"Imagen: {img_file.name}", use_container_width=True)
+
+    st.info("Cuando termines de revisar, pasa a la pestaña de procesamiento.")
+# ===============================================================
+# 3️⃣ Pestaña de Procesamiento
+# ===============================================================
+with tabs[2]:
+    st.header("Procesamiento de Imágenes")
+
+    st.markdown("Sube tus imágenes o usa las existentes en la carpeta `Pruebas` para procesarlas con el modelo YOLO y clasificar paneles con hotspots.")
+
+    uploaded_files_proc = st.file_uploader(
+        "Seleccionar imágenes a procesar", type=["jpg", "png"], accept_multiple_files=True
+    )
+
+    if st.button("Iniciar procesamiento"):
+        import cv2
+        import numpy as np
+        from ultralytics import YOLO
+        import os
+        from datetime import datetime
+        from scipy.signal import convolve2d
+
+        st.info("🔄 Iniciando procesamiento, por favor espera...")
+
+        # === CONFIGURACIÓN ===
+        input_dir = "Pruebas"
+        ruta_base = "C:/DAPCTER/ProyectoDAPCTER"
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        ruta_carpeta = os.path.join(ruta_base, fecha_hoy)
+
+        output_dir_HS = os.path.join(ruta_carpeta, "Paneles_HS")
+        output_dir_OK = os.path.join(ruta_carpeta, "Paneles_Sanos")
+        os.makedirs(output_dir_HS, exist_ok=True)
+        os.makedirs(output_dir_OK, exist_ok=True)
+
+        INTENSIDAD_UMBRAL = 45
+        VECINDAD = 5
+        kernel = np.ones((VECINDAD, VECINDAD), np.float32)
+
+        # === Guardar las imágenes subidas temporalmente si existen ===
+        if uploaded_files_proc:
+            input_dir = os.path.join(ruta_carpeta, "Subidas")
+            os.makedirs(input_dir, exist_ok=True)
+            for img_file in uploaded_files_proc:
+                img = Image.open(img_file)
+                img.save(os.path.join(input_dir, img_file.name))
+
+        # === Verificación inicial ===
+        if not os.path.exists(input_dir):
+            st.error(f"No existe la carpeta {input_dir}")
+            st.stop()
+
+        imagenes = [
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+
+        if not imagenes:
+            st.warning("⚠️ No hay imágenes en la carpeta para procesar.")
+            st.stop()
+
+        # === Cargar modelo YOLO ===
+        st.write("📦 Cargando modelo YOLO...")
+        model = YOLO("best.pt")
+        classNames = ["Panel-Hotspots"]
+
+        countHS, countOK = 0, 0
+        progress = st.progress(0)
+
+        # === Procesamiento ===
+        for i, ruta in enumerate(imagenes):
+            frame = cv2.imread(ruta)
+            if frame is None:
+                st.warning(f"No se pudo leer {os.path.basename(ruta)}")
                 continue
 
-            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            results = model(frame, verbose=False)
+            for res in results:
+                for box in res.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cls = int(box.cls[0])
 
-            # Filtro local rápido usando OpenCV
-            resultado = convolve2d(gray_roi, kernel, mode='same', boundary='fill', fillvalue=0)
-            mean_val = np.mean(resultado)
-            mask = resultado > (mean_val + 1000)
-            num_pixels = np.count_nonzero(mask)
+                    roi = frame[y1:y2, x1:x2]
+                    if roi.size == 0:
+                        continue
 
-            # === Clasificación ===
-            if num_pixels >= 200 and (x2 - x1) > 30 and (y2 - y1) > 30:
-                filename = os.path.join(output_dir_HS, f"PanelHS_{countHS}.jpg")
-                countHS += 1
-            else:
-                filename = os.path.join(output_dir_OK, f"Panel_{countOK}.jpg")
-                countOK += 1
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    resultado = convolve2d(gray_roi, kernel, mode='same', boundary='fill', fillvalue=0)
+                    mean_val = np.mean(resultado)
+                    mask = resultado > (mean_val + 1000)
+                    num_pixels = np.count_nonzero(mask)
 
-            cv2.imwrite(filename, roi)
+                    if num_pixels >= 200 and (x2 - x1) > 30 and (y2 - y1) > 30:
+                        filename = os.path.join(output_dir_HS, f"PanelHS_{countHS}.jpg")
+                        countHS += 1
+                    else:
+                        filename = os.path.join(output_dir_OK, f"Panel_{countOK}.jpg")
+                        countOK += 1
 
-print(f"\nProceso terminado.\nPaneles HS: {countHS}\nPaneles sanos: {countOK}")
+                    cv2.imwrite(filename, roi)
+
+            progress.progress((i + 1) / len(imagenes))
+
+        # === Resultados finales ===
+        st.success(f"✅ Procesamiento finalizado.\nPaneles con HS: {countHS} | Paneles sanos: {countOK}")
+
+        # === Generar PDF simple de reporte ===
+        
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, txt="Reporte DAPCTER - Resultados del Análisis", ln=True, align="C")
+        pdf.cell(200, 10, txt=f"Fecha: {fecha_hoy}", ln=True)
+        pdf.cell(200, 10, txt=f"Paneles con Hotspots: {countHS}", ln=True)
+        pdf.cell(200, 10, txt=f"Paneles sanos: {countOK}", ln=True)
+        pdf.output("Reporte_DAPCTER.pdf")
+
+        with open("Reporte_DAPCTER.pdf", "rb") as pdf_file:
+            st.download_button("📥 Descargar reporte PDF", pdf_file, file_name="Reporte_DAPCTER.pdf")
