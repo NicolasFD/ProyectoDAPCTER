@@ -1,208 +1,274 @@
 import streamlit as st
 import cv2
 import os
-from datetime import datetime
-from PIL import Image
-import numpy as np
 import time
-
-# === CONFIGURACIÓN GENERAL ===
-st.set_page_config(page_title="DAPCTER", page_icon="🛰️", layout="wide")
+from datetime import datetime
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
+import numpy as np
+# ===============================================================
+# CONFIGURACIÓN GENERAL
+# ===============================================================
+st.set_page_config(
+    page_title="DAPCTER",
+    page_icon="🛰️",
+    layout="wide"
+)
 
 st.title("DAPCTER - Sistema de Detección y Procesamiento Aéreo")
-st.write("Aplicación para conectar, capturar y procesar imágenes térmicas de paneles solares.")
-
-# === MENÚ DE PESTAÑAS ===
-tabs = st.tabs(["Conexión", "Vuelo", "Procesamiento"])
+st.write("Aplicación para conectar, capturar y procesar imágenes térmicas.")
 
 # ===============================================================
-# 1️⃣ Pestaña de Conexión
+# VARIABLES DE SESIÓN
 # ===============================================================
-with tabs[0]:
-    st.header("Conexión del Sistema")
-    st.markdown("Conecta el transmisor y verifica la cámara en tiempo real.")
+if "vuelo_id" not in st.session_state:
+    st.session_state.vuelo_id = None
 
-    iniciar = st.button("🔌 Iniciar conexión", key="btn_iniciar_conexion")
+if "ruta_vuelo" not in st.session_state:
+    st.session_state.ruta_vuelo = None
 
-    if iniciar:
-        st.success("✅ Transmisor conectado correctamente.")
-        st.info("La cámara está lista para transmitir video.")
-
-    camara_conexion = st.checkbox("Mostrar cámara en vivo (Conexión)", key="chk_conexion")
-
-    if camara_conexion:
-        stframe = st.empty()
-        cap = cv2.VideoCapture(0)
-        cap.set(3, 640)
-        cap.set(4, 480)
-
-        st.warning("Presiona *Detener vista previa* para cerrar la cámara.")
-        stop = st.button("Detener vista previa", key="btn_detener_conexion")
-
-        while cap.isOpened() and not stop:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("❌ No se pudo acceder a la cámara.")
-                break
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            stframe.image(frame_rgb, channels="RGB", caption="Cámara en vivo - Conexión")
-            time.sleep(0.03)
-            stop = st.session_state.get("btn_detener_conexion", False)
-            if stop:
-                break
-
-        cap.release()
-        st.success("📷 Vista previa detenida.")
+if "captura_manual" not in st.session_state:
+    st.session_state.captura_manual = False
 
 # ===============================================================
-# 2️⃣ Pestaña de Vuelo
+# FUNCIÓN: CREAR SESIÓN DE VUELO
 # ===============================================================
-with tabs[1]:
-    st.header("Vuelo y Captura de Imágenes")
+def crear_sesion_vuelo():
+    fecha = datetime.now().strftime("%Y-%m-%d")
+    hora = datetime.now().strftime("%H-%M-%S")
 
-    col1, col2 = st.columns(2)
+    base = "Capturas"
+    ruta_dia = os.path.join(base, fecha)
+    ruta_vuelo = os.path.join(ruta_dia, f"Vuelo_{hora}")
 
-    with col1:
-        st.subheader("Transmisión en vivo durante vuelo")
-        camara_vuelo = st.checkbox("Activar cámara de vuelo", key="chk_vuelo")
+    os.makedirs(ruta_vuelo, exist_ok=True)
 
-        if camara_vuelo:
-            stframe2 = st.empty()
-            cap2 = cv2.VideoCapture(0)
-            cap2.set(3, 640)
-            cap2.set(4, 480)
+    st.session_state.vuelo_id = f"{fecha}_{hora}"
+    st.session_state.ruta_vuelo = ruta_vuelo
 
-            st.warning("Pulsa *Detener cámara* para finalizar transmisión.")
-            stop_vuelo = st.button("Detener cámara", key="btn_detener_vuelo")
-
-            while cap2.isOpened() and not stop_vuelo:
-                ret, frame2 = cap2.read()
-                if not ret:
-                    st.error("❌ No se puede acceder a la cámara de vuelo.")
-                    break
-                frame_rgb2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)
-                stframe2.image(frame_rgb2, channels="RGB", caption="Cámara en vuelo (en tiempo real)")
-                time.sleep(0.03)
-
-                # Verificar si se pulsó el botón
-                stop_vuelo = st.session_state.get("btn_detener_vuelo", False)
-                if stop_vuelo:
-                    break
-
-            cap2.release()
-            st.success("📴 Cámara de vuelo detenida.")
-
-        # Botón para tomar captura fuera del bucle
-        if st.button("📸 Tomar captura", key="btn_captura_vuelo"):
-            cap3 = cv2.VideoCapture(0)
-            ret, frame3 = cap3.read()
-            if ret:
-                fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
-                carpeta = "Capturas"
-                os.makedirs(carpeta, exist_ok=True)
-                filename = os.path.join(carpeta, f"captura_{fecha}.jpg")
-                cv2.imwrite(filename, frame3)
-                st.success(f"✅ Captura guardada: {filename}")
-            else:
-                st.error("❌ No se pudo tomar la captura.")
-            cap3.release()
-
-    with col2:
-        st.subheader("Revisión de capturas previas")
-        uploaded_files = st.file_uploader("Importar capturas", type=["jpg", "png"], accept_multiple_files=True, key="upl_vuelo")
-
-        if uploaded_files:
-            for img_file in uploaded_files:
-                img = Image.open(img_file)
-                st.image(img, caption=f"Imagen: {img_file.name}", use_container_width=True)
-
-    st.info("Cuando termines de revisar, pasa a la pestaña de procesamiento.")
-
-# ===============================================================
-# 3️⃣ Pestaña de Procesamiento
-# ===============================================================
-with tabs[2]:
-    st.header("Procesamiento de Imágenes")
-    st.markdown("Sube tus imágenes o usa las existentes en la carpeta `Pruebas` para procesarlas con el modelo YOLO y clasificar paneles con hotspots.")
-
-    uploaded_files_proc = st.file_uploader(
-        "Seleccionar imágenes a procesar", type=["jpg", "png"], accept_multiple_files=True, key="upl_proc"
+def obtener_fechas():
+    if not os.path.exists("Capturas"):
+        return []
+    return sorted(
+        [d for d in os.listdir("Capturas")
+         if os.path.isdir(os.path.join("Capturas", d))],
+        reverse=True
     )
 
-    if st.button("Iniciar procesamiento", key="btn_iniciar_proc"):
+def obtener_vuelos(fecha):
+    base = os.path.join("Capturas", fecha)
+    if not os.path.exists(base):
+        return []
+    return sorted(
+        [d for d in os.listdir(base)
+         if os.path.isdir(os.path.join(base, d)) and d.startswith("Vuelo_")]
+    )
+
+
+# ===============================================================
+# VIDEO PROCESSOR
+# ===============================================================
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.ruta_vuelo = None
+        self.capturar = False
+        self.ultima_captura = 0
+        self.cooldown = 1.0  # segundos
+
+    def set_ruta_vuelo(self, ruta):
+        self.ruta_vuelo = ruta
+
+    def solicitar_captura(self):
+        self.capturar = True
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        ahora = time.time()
+
+        if (
+            self.capturar
+            and self.ruta_vuelo
+            and (ahora - self.ultima_captura) >= self.cooldown
+        ):
+            hora = datetime.now().strftime("%H-%M-%S")
+            nombre = f"captura_{hora}.jpg"
+            ruta = os.path.join(self.ruta_vuelo, nombre)
+
+            cv2.imwrite(ruta, img)
+
+            self.ultima_captura = ahora
+            self.capturar = False
+            print(f"📸 Captura guardada → {ruta}")
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# ===============================================================
+# PESTAÑAS
+# ===============================================================
+tab_vuelo, tab_proc = st.tabs(
+    ["✈️ Vuelo", "🧠 Procesamiento"]
+)
+
+# ===============================================================
+# ✈️ VUELO
+# ===============================================================
+with tab_vuelo:
+    st.header("✈️ Vuelo y Captura Manual")
+
+    col_left, col_right = st.columns([1, 2])
+
+    # ==========================
+    # CONTROLES
+    # ==========================
+    with col_right:
+        st.subheader("📡 Cámara en tiempo real")
+
+        ctx = webrtc_streamer(
+            key="camara-vuelo",
+            video_processor_factory=VideoProcessor,
+            media_stream_constraints={
+                "video": {"width": 640, "height": 480},
+                "audio": False
+            },
+            async_processing=True
+        )
+
+        if ctx and ctx.video_processor and st.session_state.ruta_vuelo:
+            ctx.video_processor.set_ruta_vuelo(
+                st.session_state.ruta_vuelo
+            )
+    
+    with col_left:
+        st.subheader("🎮 Controles")
+
+        if st.button("🛫 Iniciar nuevo vuelo"):
+            crear_sesion_vuelo()
+            st.success("Vuelo iniciado correctamente")
+
+        if st.session_state.ruta_vuelo:
+            st.info(f"📂 Carpeta activa:\n{st.session_state.ruta_vuelo}")
+        else:
+            st.warning("No hay vuelo activo")
+
+        st.divider()
+
+        if st.session_state.ruta_vuelo:
+            if st.button("📸 Tomar captura"):
+                if ctx and ctx.video_processor:
+                    ctx.video_processor.solicitar_captura()
+                    st.success("📸 Captura solicitada")
+                else:
+                    st.warning("La cámara no está lista")
+
+    # ==========================
+    # VIDEO
+    # ==========================
+# ===============================================================
+# 3️⃣ PROCESAMIENTO
+# ===============================================================
+with tab_proc:
+    st.header("🧠 Procesamiento de Imágenes")
+
+    st.markdown("### 📂 Selección de vuelo")
+
+    fechas = obtener_fechas()
+
+    if not fechas:
+        st.warning("No hay vuelos registrados aún")
+        st.stop()
+
+    fecha_sel = st.selectbox(
+        "📅 Fecha del vuelo",
+        fechas
+    )
+
+    vuelos = obtener_vuelos(fecha_sel)
+
+    if not vuelos:
+        st.warning("No hay vuelos en esta fecha")
+        st.stop()
+
+    vuelo_sel = st.selectbox(
+        "✈️ Vuelo",
+        vuelos
+    )
+
+    ruta_vuelo = os.path.join("Capturas", fecha_sel, vuelo_sel)
+
+    imagenes = [
+        os.path.join(ruta_vuelo, f)
+        for f in os.listdir(ruta_vuelo)
+        if f.lower().endswith((".jpg", ".png"))
+    ]
+
+    st.info(f"📸 Imágenes encontradas: {len(imagenes)}")
+
+    st.divider()
+
+    # -----------------------------------------------------------
+    # PROCESAMIENTO
+    # -----------------------------------------------------------
+    if st.button("🚀 Iniciar procesamiento"):
+
+        if not imagenes:
+            st.error("❌ No hay imágenes para procesar")
+            st.stop()
+
         from ultralytics import YOLO
         from scipy.signal import convolve2d
 
-        st.info("🔄 Iniciando procesamiento, por favor espera...")
+        st.info("🔄 Procesando imágenes...")
 
-        input_dir = "Pruebas"
-        ruta_base = "C:/DAPCTER/ProyectoDAPCTER"
-        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-        ruta_carpeta = os.path.join(ruta_base, fecha_hoy)
+        base_resultados = os.path.join(
+            "Resultados",
+            fecha_sel,
+            vuelo_sel
+        )
 
-        output_dir_HS = os.path.join(ruta_carpeta, "Paneles_HS")
-        output_dir_OK = os.path.join(ruta_carpeta, "Paneles_Sanos")
-        os.makedirs(output_dir_HS, exist_ok=True)
-        os.makedirs(output_dir_OK, exist_ok=True)
+        hs_dir = os.path.join(base_resultados, "Paneles_HS")
+        ok_dir = os.path.join(base_resultados, "Paneles_Sanos")
 
-        VECINDAD = 5
-        kernel = np.ones((VECINDAD, VECINDAD), np.float32)
+        os.makedirs(hs_dir, exist_ok=True)
+        os.makedirs(ok_dir, exist_ok=True)
 
-        if uploaded_files_proc:
-            input_dir = os.path.join(ruta_carpeta, "Subidas")
-            os.makedirs(input_dir, exist_ok=True)
-            for img_file in uploaded_files_proc:
-                img = Image.open(img_file)
-                img.save(os.path.join(input_dir, img_file.name))
-
-        if not os.path.exists(input_dir):
-            st.error(f"No existe la carpeta {input_dir}")
-            st.stop()
-
-        imagenes = [
-            os.path.join(input_dir, f)
-            for f in os.listdir(input_dir)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
-        ]
-
-        if not imagenes:
-            st.warning("⚠️ No hay imágenes en la carpeta para procesar.")
-            st.stop()
-
-        st.write("📦 Cargando modelo YOLO...")
         model = YOLO("best.pt")
+        kernel = np.ones((5, 5), np.float32)
+
         countHS, countOK = 0, 0
         progress = st.progress(0)
 
         for i, ruta in enumerate(imagenes):
             frame = cv2.imread(ruta)
-            if frame is None:
-                st.warning(f"No se pudo leer {os.path.basename(ruta)}")
-                continue
-
             results = model(frame, verbose=False)
+
             for res in results:
                 for box in res.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     roi = frame[y1:y2, x1:x2]
+
                     if roi.size == 0:
                         continue
 
-                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    resultado = convolve2d(gray_roi, kernel, mode='same', boundary='fill', fillvalue=0)
-                    mean_val = np.mean(resultado)
-                    mask = resultado > (mean_val + 1000)
-                    num_pixels = np.count_nonzero(mask)
+                    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    conv = convolve2d(gray, kernel, mode="same")
 
-                    if num_pixels >= 200 and (x2 - x1) > 30 and (y2 - y1) > 30:
-                        filename = os.path.join(output_dir_HS, f"PanelHS_{countHS}.jpg")
+                    if np.count_nonzero(conv > (np.mean(conv) + 1000)) >= 200:
+                        cv2.imwrite(
+                            os.path.join(hs_dir, f"HS_{countHS}.jpg"),
+                            roi
+                        )
                         countHS += 1
                     else:
-                        filename = os.path.join(output_dir_OK, f"Panel_{countOK}.jpg")
+                        cv2.imwrite(
+                            os.path.join(ok_dir, f"OK_{countOK}.jpg"),
+                            roi
+                        )
                         countOK += 1
-
-                    cv2.imwrite(filename, roi)
 
             progress.progress((i + 1) / len(imagenes))
 
-        st.success(f"✅ Procesamiento finalizado.\nPaneles con HS: {countHS} | Paneles sanos: {countOK}")
+        st.success(
+            f"✅ Finalizado | HS: {countHS} | Sanos: {countOK}"
+        )
+
+

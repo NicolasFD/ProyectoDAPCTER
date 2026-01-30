@@ -1,100 +1,111 @@
+import streamlit as st
 import cv2
-import numpy as np
-from ultralytics import YOLO
 import os
+import time
+from datetime import datetime
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
 
-# Carpeta donde están las imágenes guardadas por el script anterior
-input_dir = "ImagenesPruebas"
+# ===============================================================
+# CONFIGURACIÓN GENERAL
+# ===============================================================
+st.set_page_config(
+    page_title="DAPCTER",
+    page_icon="🛰️",
+    layout="wide"
+)
 
-# Verificar carpeta
-if not os.path.exists(input_dir):
-    raise FileNotFoundError(f"No existe la carpeta {input_dir}")
+st.title("DAPCTER - Sistema de Detección y Procesamiento Aéreo")
+st.write("Aplicación para conectar, capturar y procesar imágenes térmicas.")
 
-# Obtener lista de imágenes
-imagenes = [f for f in os.listdir(input_dir)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+# ===============================================================
+# VIDEO PROCESSOR
+# ===============================================================
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.capturar = False
+        self.ultimo_disparo = 0
+        self.cooldown = 1.0  # segundos
 
-if not imagenes:
-    print("No hay imágenes en la carpeta.")
-else:
-    count=0
-    for nombre in imagenes:
-        ruta = os.path.join(input_dir, nombre)
-        frame = cv2.imread(ruta)
-        if frame is None:
-            print(f"No se pudo leer {nombre}")
-            continue
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        ahora = time.time()
 
-            # === Cargar el modelo YOLO ===
-        model = YOLO("best.pt")
+        if self.capturar and (ahora - self.ultimo_disparo) >= self.cooldown:
+            os.makedirs("Capturas", exist_ok=True)
+            ruta = os.path.join(
+                "Capturas",
+                f"captura_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            )
+            cv2.imwrite(ruta, img)
+            self.ultimo_disparo = ahora
+            self.capturar = False
+            print(f"📸 Captura guardada → {ruta}")
 
-        classNames = ["Panel-Hotspots"]
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        output_dir = "detecciones_guardadas"
-        os.makedirs(output_dir, exist_ok=True)
+# ===============================================================
+# PESTAÑAS
+# ===============================================================
+tab_conexion, tab_vuelo, tab_proc = st.tabs(
+    ["🔌 Conexión", "✈️ Vuelo", "🧠 Procesamiento"]
+)
 
-        # === Procesar la imagen ===
-        results = model(frame, stream=True)
+# ===============================================================
+# 1️⃣ CONEXIÓN
+# ===============================================================
+with tab_conexion:
+    st.header("Conexión del Sistema")
 
-        
-        for res in results:
-            boxes = res.boxes
-            if boxes is None or len(boxes) == 0:
-                continue
+    if st.button("🔌 Iniciar conexión"):
+        st.success("✅ Transmisor conectado")
+        st.info("Cámara lista para el vuelo")
 
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+# ===============================================================
+# 2️⃣ VUELO (CÁMARA + CAPTURA)
+# ===============================================================
+with tab_vuelo:
+    st.header("Vuelo y Captura Manual")
 
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                label = classNames[cls] if cls < len(classNames) else f"Class {cls}"
+    col_left, col_right = st.columns([1, 2])
 
-                # Paso 1: Matriz de valores
-                roi = frame[y1:y2,x1:x2]
-                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # ---- VISUALIZACIÓN ----
+    with col_right:
+        st.subheader("📡 Vista en tiempo real")
 
-                # Paso 2: Media y máscara
-                mean_val = np.mean(gray_roi)
-                num_pixels = np.sum(gray_roi > mean_val+36)
-                #mask=gray_roi > mean_val
+        ctx = webrtc_streamer(
+            key="camara-vuelo",
+            video_processor_factory=VideoProcessor,
+            media_stream_constraints={
+                "video": {"width": 640, "height": 480},
+                "audio": False
+            },
+            async_processing=True
+        )
 
-                # Paso 3: Guardar si hay píxeles mayores a la media
-                if num_pixels >= 200 and x2-x1>30 and y2-y1>30:
-                    filename = f"{output_dir}/{label}_{int(count)}.jpg"
-                    cv2.imwrite(filename, roi)
-                    count+=1
-                
-                #if np.any(mask):
-                    #filename = f"{output_dir}/{label}_{int(count)}.jpg"
-                    #cv2.imwrite(filename, roi)
-                    #count+=1
+    # ---- CONTROLES ----
+    with col_left:
+        st.subheader("🎮 Controles de Vuelo")
 
+        if ctx.video_processor:
+            if st.button("📸 Tomar captura"):
+                ctx.video_processor.capturar = True
+                st.success("📸 Imagen capturada")
 
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            st.markdown("### ⏱️ Seguridad")
+            st.write(
+                f"Tiempo mínimo entre capturas: "
+                f"{ctx.video_processor.cooldown:.1f} s"
+            )
+        else:
+            st.info("Esperando inicialización de la cámara...")
 
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                label = classNames[cls] if cls < len(classNames) else f"Class {cls}"
+        st.divider()
+        st.caption("DAPCTER · Captura manual estable")
 
-                # Paso 1: Matriz de valores
-                roi = frame[y1:y2,x1:x2]
-                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-                # Paso 2: Media y máscara
-                mean_val = np.mean(gray_roi)
-                mask = gray_roi > mean_val
-
-                #Dibujar bounding box
-                text = f"{label} {conf:.2f} Mean:{mean_val:.1f}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255, 0, 0), 2)
-
-        # Mostrar la imagen con detecciones
-        
-        
-        
-print("\nProceso terminado.")
+# ===============================================================
+# 3️⃣ PROCESAMIENTO (VACÍO POR AHORA)
+# ===============================================================
+with tab_proc:
+    st.header("Procesamiento de Imágenes")
+    st.info("Aquí irá YOLO y análisis térmico (siguiente paso)")
