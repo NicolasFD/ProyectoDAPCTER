@@ -4,7 +4,7 @@ import numpy as np
 import os
 
 # === Cargar imagen de prueba ===
-imagen_path = "ImagenesPruebas/002R.jpg"   # pon aquí el nombre de tu archivo
+imagen_path = "WIN_20251210_11_56_04_Pro.jpg"   # pon aquí el nombre de tu archivo
 frame = cv2.imread(imagen_path)
 
 if frame is None:
