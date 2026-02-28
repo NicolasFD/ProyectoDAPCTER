@@ -89,6 +89,29 @@ def obtener_angulo_panel(roi):
 
     return float(np.median(angulos))
 
+def extraer_roi_con_mascara(img, box_xyxy, mask_full):
+    """
+    img: imagen BGR completa (H,W,3)
+    box_xyxy: (x1,y1,x2,y2) ints
+    mask_full: máscara booleana o 0/1 del tamaño (H,W)
+    """
+    x1, y1, x2, y2 = box_xyxy
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(img.shape[1], x2); y2 = min(img.shape[0], y2)
+
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None, None
+
+    mask_crop = mask_full[y1:y2, x1:x2].astype(np.uint8)  # 0/1
+    if mask_crop.size == 0 or mask_crop.sum() < 50:
+        return None, None
+
+    # aplica máscara: deja fondo en negro
+    roi_masked = roi.copy()
+    roi_masked[mask_crop == 0] = (0, 0, 0)
+
+    return roi_masked, mask_crop
 # ===============================================================
 # INFORME PDF
 # ===============================================================
@@ -534,7 +557,7 @@ with tab_proc:
         os.makedirs(hs_dir, exist_ok=True)
         os.makedirs(ok_dir, exist_ok=True)
 
-        model = YOLO("best.pt")
+        model = YOLO("best-seg.pt")
         kernel = np.ones((3, 3), np.float32)
 
         hs, ok = 0, 0
@@ -548,59 +571,69 @@ with tab_proc:
             img = cv2.imread(ruta)
             res = model(img, verbose=False)
 
-            info_imagen = {
-                "ruta": ruta,
-                "paneles": []
-            }
-
+            info_imagen = {"ruta": ruta, "paneles": []}
             panel_id = 0
 
             for r in res:
-                for box in r.boxes:
+                if r.masks is None or r.boxes is None:
+                    continue
 
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # masks.data: (N, H, W) tipo torch
+                masks = r.masks.data.cpu().numpy()  # 0/1 floats normalmente
+                boxes = r.boxes.xyxy.cpu().numpy().astype(int)
 
-                    roi = img[y1:y2, x1:x2]
+                for j in range(len(boxes)):
+                    x1, y1, x2, y2 = boxes[j]
+                    mask_full = (masks[j] > 0.5)  # boolean (H,W)
 
-                    if roi.size == 0:
+                    roi_masked, mask_crop = extraer_roi_con_mascara(img, (x1, y1, x2, y2), mask_full)
+                    if roi_masked is None:
                         continue
 
-                    angulo = obtener_angulo_panel(roi)
-                    roi = rotar_imagen(roi, angulo)
+                    # --- (opcional) rotación basada en bordes: mejor hacerlo con roi_masked ---
+                    angulo = obtener_angulo_panel(roi_masked)
+                    roi_masked = rotar_imagen(roi_masked, angulo)
 
-                    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    # Nota: al rotar, la máscara original ya no coincide.
+                    # Si quieres ser estricto, deberías rotar también la máscara.
+                    # Solución rápida: analiza sobre roi_masked asumiendo fondo negro.
+
+                    g = cv2.cvtColor(roi_masked, cv2.COLOR_BGR2GRAY)
+
+                    # si el fondo negro te sesga la media, calcula métricas SOLO donde g>0
+                    valid = (g > 0)
+                    if np.count_nonzero(valid) < 200:
+                        continue
+
+                    # Convolución
                     c = convolve2d(g, kernel, mode="same")
 
-                    intensidad = np.max(c)
+                    # métricas SOLO en región válida
+                    c_valid = c[valid]
+                    intensidad = float(np.max(c_valid))
+                    media = float(np.mean(c_valid))
 
-                    es_hotspot = np.count_nonzero(c > np.mean(c) + 1000) >= 200
+                    es_hotspot = np.count_nonzero(c_valid > media + 1000) >= 200
 
                     gravedad = clasificar_gravedad(es_hotspot, intensidad)
 
                     if es_hotspot:
-
                         nombre = f"HS_{hs}.jpg"
                         ruta_panel = os.path.join(hs_dir, nombre)
-                        cv2.imwrite(ruta_panel, roi)
+                        cv2.imwrite(ruta_panel, roi_masked)
                         hs += 1
-
                     else:
-
                         nombre = f"OK_{ok}.jpg"
                         ruta_panel = os.path.join(ok_dir, nombre)
-                        cv2.imwrite(ruta_panel, roi)
+                        cv2.imwrite(ruta_panel, roi_masked)
                         ok += 1
 
-
                     info_imagen["paneles"].append({
-
                         "id": f"Panel_{panel_id}",
                         "hotspot": es_hotspot,
                         "gravedad": gravedad,
                         "ruta_panel": ruta_panel
-
                     })
-
 
                     panel_id += 1
 
