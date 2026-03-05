@@ -56,39 +56,190 @@ def obtener_items(base, prefijo):
          if os.path.isdir(os.path.join(base, d)) and d.startswith(prefijo)]
     )
 
-def rotar_imagen(img, angulo):
-    (h, w) = img.shape[:2]
-    centro = (w // 2, h // 2)
+def extraer_roi_con_mascara(img, box_xyxy, mask_full):
+    """
+    img: imagen BGR completa (H,W,3)
+    box_xyxy: (x1,y1,x2,y2) ints
+    mask_full: máscara booleana o 0/1 del tamaño (H,W)
+    """
+    x1, y1, x2, y2 = box_xyxy
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(img.shape[1], x2); y2 = min(img.shape[0], y2)
 
-    M = cv2.getRotationMatrix2D(centro, angulo, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None, None
 
-    nW = int((h * sin) + (w * cos))
-    nH = int((h * cos) + (w * sin))
+    mask_crop = mask_full[y1:y2, x1:x2].astype(np.uint8)  # 0/1
+    if mask_crop.size == 0 or mask_crop.sum() < 50:
+        return None, None
 
-    M[0, 2] += (nW / 2) - centro[0]
-    M[1, 2] += (nH / 2) - centro[1]
+    # aplica máscara: deja fondo en negro
+    roi_masked = roi.copy()
+    roi_masked[mask_crop == 0] = (0, 0, 0)
 
-    return cv2.warpAffine(img, M, (nW, nH))
+    return roi_masked, mask_crop
 
+def resize_mask_to_image(mask_u8, img):
+    """Asegura que la máscara sea (H,W) igual a la imagen."""
+    H, W = img.shape[:2]
+    if mask_u8.shape[:2] != (H, W):
+        mask_u8 = cv2.resize(mask_u8, (W, H), interpolation=cv2.INTER_NEAREST)
+    return mask_u8
 
-def obtener_angulo_panel(roi):
-    gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gris, 50, 150, apertureSize=3)
+def guardar_instancia(base_dir, instancia_id, roi, mask_roi_u8, roi_masked):
+    """
+    Crea carpeta panel_X y guarda:
+    - mask.png (recortada al ROI)
+    - roi_original.png
+    - roi_masked.png (fondo negro)
+    - panel_limpio.png (igual a roi_masked)
+    Devuelve ruta_panel_limpio.
+    """
+    carpeta = os.path.join(base_dir, f"panel_{instancia_id}")
+    os.makedirs(carpeta, exist_ok=True)
 
-    lineas = cv2.HoughLines(edges, 1, np.pi / 180, 120)
-    if lineas is None:
-        return 0.0
+    cv2.imwrite(os.path.join(carpeta, "mask.png"), mask_roi_u8 * 255)
+    cv2.imwrite(os.path.join(carpeta, "roi_original.png"), roi)
+    cv2.imwrite(os.path.join(carpeta, "roi_masked.png"), roi_masked)
+    cv2.imwrite(os.path.join(carpeta, "panel_limpio.png"), roi_masked)
 
-    angulos = []
-    for linea in lineas[:10]:
-        rho, theta = linea[0]
-        angulo = (theta - np.pi / 2) * 180 / np.pi
-        angulos.append(angulo)
+    return os.path.join(carpeta, "panel_limpio.png")
 
-    return float(np.median(angulos))
+def dibujar_contorno_y_label(img_bgr, mask_full_u8, label_text, color=(0,255,0)):
+    """Dibuja contorno + etiqueta sobre la imagen completa."""
+    contours, _ = cv2.findContours(mask_full_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return img_bgr
 
+    cv2.drawContours(img_bgr, contours, -1, color, 2)
+
+    # ubicar etiqueta en esquina superior del bbox del contorno
+    ys, xs = np.where(mask_full_u8 == 1)
+    if len(xs) > 0 and len(ys) > 0:
+        x1, y1 = int(xs.min()), int(ys.min())
+        cv2.putText(img_bgr, label_text, (x1, max(0, y1-5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+    return img_bgr
+
+def detectar_hotspot_local_robusto(
+    roi_bgr,
+    valid_mask_bool,
+    kernel_size=51,
+    blur_mode="gauss",
+    blur_ksize=7,
+    k_sigma=2.2,
+    min_area=40,
+    close_ksize=7,
+    min_dist_edge=1.0,
+    min_fill=0.12,
+    max_aspect=6.0,
+    panel_mask_u8=None,
+    crop_top=0.08,        # <- NUEVO (8% arriba)
+    crop_bottom=0.15      # <- NUEVO (15% abajo) AJUSTABLE
+):
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Suavizado
+    if blur_mode != "none":
+        k = max(1, int(blur_ksize))
+        if blur_mode == "gauss":
+            if k % 2 == 0:
+                k += 1
+            gray = cv2.GaussianBlur(gray, (k, k), 0)
+        elif blur_mode == "box":
+            gray = cv2.blur(gray, (k, k))
+
+    # Fondo local y realce
+    kbg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    fondo = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kbg)
+    diff = cv2.subtract(gray, fondo)
+
+    valid_u8 = (valid_mask_bool.astype(np.uint8) * 255)
+    vals = diff[valid_u8 > 0]
+    if vals.size < 50:
+        return np.zeros_like(valid_u8), diff, [], 0.0, 0
+
+    mu = float(np.mean(vals))
+    sigma = float(np.std(vals))
+    thr = mu + k_sigma * sigma
+
+    mask = np.zeros_like(valid_u8)
+
+    # --- construir máscara del panel ---
+        # --- construir máscara del panel ---
+    if panel_mask_u8 is not None:
+        pm = (panel_mask_u8 > 0).astype(np.uint8)
+    else:
+        pm = valid_mask_bool.astype(np.uint8)
+
+    # --- recorte por franja (anti-serrucho inferior) ---
+    h, w = pm.shape
+    top = int(crop_top * h)
+    bottom = int(crop_bottom * h)
+
+    interior_mask = pm.copy()
+    if top > 0:
+        interior_mask[:top, :] = 0
+    if bottom > 0:
+        interior_mask[h-bottom:, :] = 0
+
+    # aplicar threshold SOLO al interior "seguro"
+    mask[(diff >= thr) & (interior_mask > 0)] = 255
+
+    # (Opcional) si quieres guardar la banda de borde para debug:
+    # border_band = ((pm - pm_er) > 0).astype(np.uint8)
+
+    # Cierre morfológico
+    if close_ksize > 1:
+        kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc, iterations=1)
+
+    # Distancia al borde (usando pm "interior")
+    margen = 3
+    k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (margen, margen))
+    pm_inner = cv2.erode(pm, k_in, iterations=1)
+    if np.count_nonzero(pm_inner) < 50:
+        pm_inner = pm.copy()
+
+    dist_map = cv2.distanceTransform(pm_inner.astype(np.uint8), cv2.DIST_L2, 5)
+
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    good = []
+    area_total = 0.0
+
+    for lab in range(1, num):
+        x, y, w, h, area = stats[lab]
+        if area < min_area:
+            continue
+
+        fill_ratio = area / float(w * h + 1e-5)
+        if fill_ratio < min_fill:
+            continue
+
+        aspect_ratio = max(w / float(h + 1e-5), h / float(w + 1e-5))
+        if aspect_ratio > max_aspect:
+            continue
+
+        comp_mask = (labels == lab).astype(np.uint8)
+        dvals = dist_map[comp_mask > 0]
+        if dvals.size == 0:
+            continue
+
+        min_dist = float(np.min(dvals))
+        if min_dist < float(min_dist_edge):
+            continue
+
+        good.append(lab)
+        area_total += float(area)
+
+    mask_big = np.zeros_like(mask)
+    for lab in good:
+        mask_big[labels == lab] = 255
+
+    cnts, _ = cv2.findContours(mask_big, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return mask_big, diff, cnts, area_total, len(cnts)
 # ===============================================================
 # INFORME PDF
 # ===============================================================
@@ -123,14 +274,14 @@ class InformePDF(FPDF):
 
         # -------------------------
         # IMAGEN PANEL (IZQUIERDA)
+        # Prioridad: panel anotado (contorno manchas) > panel limpio
         # -------------------------
+        ruta_panel_img = datos.get("ruta_panel_ann") or datos.get("ruta_panel")
 
-        if os.path.exists(datos["ruta_panel"]):
-
+        if ruta_panel_img and os.path.exists(ruta_panel_img):
             ANCHO_PANEL = 40
-
             self.image(
-                datos["ruta_panel"],
+                ruta_panel_img,
                 x=10,
                 y=y_inicio,
                 w=ANCHO_PANEL
@@ -146,15 +297,15 @@ class InformePDF(FPDF):
         self.set_font("Arial", "B", 10)
 
         filas = [
-
             ("Imagen origen", datos["imagen"]),
             ("Vuelo", datos["vuelo"]),
             ("Subida", datos["subida"]),
-            ("Panel", datos["panel"]),
+            ("Panel (imagen marcada)", datos["panel"]),
             ("Punto caliente", datos["punto_caliente"]),
             ("Gravedad", datos["gravedad"]),
+            ("Area manchas", round(float(datos.get("area_manchas", 0.0)), 1)),
+            ("Num manchas", int(datos.get("num_manchas", 0))),
             ("Recomendacion", datos["recomendacion"])
-
         ]
 
         col1 = 45
@@ -243,7 +394,7 @@ def generar_informe_pdf(base_res, vuelo, subida, imagenes_info):
 
         pdf.add_page()
 
-        ruta_img = img_info["ruta"]
+        ruta_img = img_info.get("ruta_marcada", img_info["ruta"])
         nombre = os.path.basename(ruta_img)
 
         pdf.set_font("Arial", "B", 12)
@@ -265,15 +416,20 @@ def generar_informe_pdf(base_res, vuelo, subida, imagenes_info):
             gravedad = panel["gravedad"]
 
             datos = {
-
                 "imagen": nombre,
                 "vuelo": vuelo,
                 "subida": subida,
-                "panel": panel["id"],
+                "panel": panel.get("panel_code", panel["id"]),
                 "punto_caliente": "SI" if panel["hotspot"] else "NO",
                 "gravedad": gravedad,
                 "recomendacion": obtener_recomendacion(gravedad),
-                "ruta_panel": panel["ruta_panel"]
+
+                "ruta_panel": panel.get("ruta_panel"),
+                "ruta_panel_ann": panel.get("ruta_panel_ann"),
+
+                # ✅ agrega esto:
+                "area_manchas": panel.get("area_manchas", 0.0),
+                "num_manchas": panel.get("num_manchas", 0),
             }
 
 
@@ -531,10 +687,15 @@ with tab_proc:
         base_res = os.path.join("Resultados", fecha_sel, os.path.basename(ruta_origen))
         hs_dir = os.path.join(base_res, "Paneles_HS")
         ok_dir = os.path.join(base_res, "Paneles_Sanos")
+        inst_dir = os.path.join(base_res, "Instancias") 
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        marked_dir = os.path.join(base_res, "Marcadas", run_id)
+        os.makedirs(marked_dir, exist_ok=True)     # panel_1, panel_2...     # imagen marcada por cada foto
+        os.makedirs(inst_dir, exist_ok=True)
         os.makedirs(hs_dir, exist_ok=True)
         os.makedirs(ok_dir, exist_ok=True)
 
-        model = YOLO("best.pt")
+        model = YOLO("best-seg.pt")
         kernel = np.ones((3, 3), np.float32)
 
         hs, ok = 0, 0
@@ -546,71 +707,157 @@ with tab_proc:
         for i, ruta in enumerate(imagenes_seleccionadas):
 
             img = cv2.imread(ruta)
+            img_marked = img.copy()
             res = model(img, verbose=False)
 
-            info_imagen = {
-                "ruta": ruta,
-                "paneles": []
-            }
-
+            info_imagen = {"ruta": ruta, "paneles": []}
             panel_id = 0
 
             for r in res:
-                for box in r.boxes:
+                if r.masks is None or r.masks.data is None:
+                    continue
 
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                masks = r.masks.data.detach().cpu().numpy()  # (N,H,W) floats
+                H, W = img.shape[:2]
 
-                    roi = img[y1:y2, x1:x2]
+                # =========================================================
+                # ✅ 1) Construir lista de instancias (bbox + máscara)
+                # =========================================================
+                instances = []
+                for j in range(masks.shape[0]):
+                    mask_full = (masks[j] > 0.5).astype(np.uint8)
 
-                    if roi.size == 0:
+                    # asegurar tamaño máscara = tamaño imagen
+                    if mask_full.shape[:2] != (H, W):
+                        mask_full = cv2.resize(mask_full, (W, H), interpolation=cv2.INTER_NEAREST)
+
+                    # filtrar ruido
+                    if int(mask_full.sum()) < 500:
                         continue
 
-                    angulo = obtener_angulo_panel(roi)
-                    roi = rotar_imagen(roi, angulo)
+                    ys, xs = np.where(mask_full == 1)
+                    if xs.size == 0 or ys.size == 0:
+                        continue
 
-                    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    c = convolve2d(g, kernel, mode="same")
+                    x1, x2 = int(xs.min()), int(xs.max())
+                    y1, y2 = int(ys.min()), int(ys.max())
 
-                    intensidad = np.max(c)
+                    instances.append((x1, x2, y1, y2, mask_full))
 
-                    es_hotspot = np.count_nonzero(c > np.mean(c) + 1000) >= 200
+                # ✅ 2) Orden izquierda→derecha por x1
+                instances.sort(key=lambda t: t[0])
+
+                # ✅ 3) Recorremos ya ordenado
+                for (x1, x2, y1, y2, mask_full) in instances:
+                    roi = img[y1:y2+1, x1:x2+1]
+                    mask_roi = mask_full[y1:y2+1, x1:x2+1].astype(np.uint8)
+
+                    if roi.size == 0 or mask_roi.sum() < 50:
+                        continue
+
+                    # panel limpio (fondo negro)
+                    roi_masked = cv2.bitwise_and(roi, roi, mask=mask_roi)
+
+                    mask_panel_u8 = (mask_roi > 0).astype(np.uint8)
+                    k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # margen ~1px
+                    valid = cv2.erode(mask_panel_u8, k_in, iterations=1).astype(bool)
+
+                    if np.count_nonzero(valid) < 200:
+                        continue
+
+                    # DETECCIÓN
+                    mask_big, resp, cnts, area_total, num_manchas = detectar_hotspot_local_robusto(
+                        roi_masked,
+                        valid_mask_bool=valid,
+                        kernel_size=51,
+                        blur_mode="gauss",
+                        blur_ksize=7,
+                        k_sigma=2.2,
+                        min_area=40,
+                        close_ksize=7,
+                        min_dist_edge=2.0,   # <- sube un poco si aún hay borde
+                        min_fill=0.12,
+                        max_aspect=6.0,
+                        panel_mask_u8=mask_roi,
+                        crop_top=0.08,
+                        crop_bottom=0.18     # <- prueba 0.15 a 0.22
+                    )
+
+                    roi_annotated = roi_masked.copy()
+                    if cnts:
+                        cv2.drawContours(roi_annotated, cnts, -1, (0,0,255), 2)
+
+                    # dibujar contornos sobre imagen completa (ROI -> imagen)
+                    for c in cnts:
+                        c2 = c.copy()
+                        c2[:, 0, 0] += x1
+                        c2[:, 0, 1] += y1
+                        cv2.drawContours(img_marked, [c2], -1, (0,0,255), 2)
+
+                    # Intensidad basada en "diff" (resp)
+                    intensidad = float(np.max(resp[valid])) if np.any(valid) else 0.0
+
+                    # ✅ más permisivo para interior pequeño, sin dispararse por borde (porque ya lo quitamos)
+                    es_hotspot = (num_manchas >= 1) and (
+                        (area_total >= 120) or
+                        (intensidad >= 1600 and area_total >= 60)
+                    )
 
                     gravedad = clasificar_gravedad(es_hotspot, intensidad)
 
+                    # Guardar HS/OK...
                     if es_hotspot:
-
                         nombre = f"HS_{hs}.jpg"
                         ruta_panel = os.path.join(hs_dir, nombre)
-                        cv2.imwrite(ruta_panel, roi)
+                        nombre_ann = f"HS_{hs}_ann.jpg"
+                        ruta_panel_ann = os.path.join(hs_dir, nombre_ann)
+                        cv2.imwrite(ruta_panel, roi_masked)
+                        cv2.imwrite(ruta_panel_ann, roi_annotated)
                         hs += 1
-
                     else:
-
                         nombre = f"OK_{ok}.jpg"
                         ruta_panel = os.path.join(ok_dir, nombre)
-                        cv2.imwrite(ruta_panel, roi)
+                        nombre_ann = f"OK_{ok}_ann.jpg"
+                        ruta_panel_ann = os.path.join(ok_dir, nombre_ann)
+                        cv2.imwrite(ruta_panel, roi_masked)
+                        cv2.imwrite(ruta_panel_ann, roi_annotated)
                         ok += 1
 
+                    # contorno del PANEL en la imagen marcada
+                    contours_panel, _ = cv2.findContours(mask_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(img_marked, contours_panel, -1, (0, 255, 0), 2)
 
+                    # Etiqueta P{panel_id} HS/OK (ahora estable)
+                    cv2.putText(img_marked, f"P{panel_id} {'HS' if es_hotspot else 'OK'}",
+                                (x1, max(0, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
+                    panel_code = f"P{panel_id}"
                     info_imagen["paneles"].append({
-
+                        "panel_code": panel_code,
                         "id": f"Panel_{panel_id}",
                         "hotspot": es_hotspot,
                         "gravedad": gravedad,
-                        "ruta_panel": ruta_panel
-
+                        "ruta_panel": ruta_panel,
+                        "ruta_panel_ann": ruta_panel_ann,
+                        "area_manchas": area_total,
+                        "num_manchas": num_manchas,
+                        "intensidad_resp": intensidad
                     })
-
 
                     panel_id += 1
 
             imagenes_info.append(info_imagen)
+            nombre_img = os.path.basename(ruta)
+            out_marked = os.path.join(marked_dir, f"marked_{os.path.basename(ruta)}")
+            cv2.imwrite(out_marked, img_marked)
+            info_imagen["ruta_marcada"] = out_marked
 
             barra.progress((i + 1) / len(imagenes_seleccionadas))
 
 
         st.success(f"✅ Procesado | HS: {hs} | Sanos: {ok}")
-
+        st.image(cv2.cvtColor(img_marked, cv2.COLOR_BGR2RGB), caption=f"Marcada: {os.path.basename(ruta)}", use_container_width=True)
+        
         vuelo_nombre = os.path.basename(ruta_origen)
         subida_nombre = fecha_sel
 
