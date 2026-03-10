@@ -130,17 +130,11 @@ def detectar_hotspot_local_robusto(
     blur_ksize=7,
     k_sigma=2.2,
     min_area=40,
-    close_ksize=7,
-    min_dist_edge=1.0,
-    min_fill=0.12,
-    max_aspect=6.0,
-    panel_mask_u8=None,
-    crop_top=0.08,        # <- NUEVO (8% arriba)
-    crop_bottom=0.15      # <- NUEVO (15% abajo) AJUSTABLE
+    close_ksize=5,
+    panel_mask_u8=None
 ):
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Suavizado
     if blur_mode != "none":
         k = max(1, int(blur_ksize))
         if blur_mode == "gauss":
@@ -150,13 +144,13 @@ def detectar_hotspot_local_robusto(
         elif blur_mode == "box":
             gray = cv2.blur(gray, (k, k))
 
-    # Fondo local y realce
     kbg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     fondo = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kbg)
     diff = cv2.subtract(gray, fondo)
 
     valid_u8 = (valid_mask_bool.astype(np.uint8) * 255)
     vals = diff[valid_u8 > 0]
+
     if vals.size < 50:
         return np.zeros_like(valid_u8), diff, [], 0.0, 0
 
@@ -165,44 +159,11 @@ def detectar_hotspot_local_robusto(
     thr = mu + k_sigma * sigma
 
     mask = np.zeros_like(valid_u8)
+    mask[(diff >= thr) & (valid_u8 > 0)] = 255
 
-    # --- construir máscara del panel ---
-        # --- construir máscara del panel ---
-    if panel_mask_u8 is not None:
-        pm = (panel_mask_u8 > 0).astype(np.uint8)
-    else:
-        pm = valid_mask_bool.astype(np.uint8)
-
-    # --- recorte por franja (anti-serrucho inferior) ---
-    h, w = pm.shape
-    top = int(crop_top * h)
-    bottom = int(crop_bottom * h)
-
-    interior_mask = pm.copy()
-    if top > 0:
-        interior_mask[:top, :] = 0
-    if bottom > 0:
-        interior_mask[h-bottom:, :] = 0
-
-    # aplicar threshold SOLO al interior "seguro"
-    mask[(diff >= thr) & (interior_mask > 0)] = 255
-
-    # (Opcional) si quieres guardar la banda de borde para debug:
-    # border_band = ((pm - pm_er) > 0).astype(np.uint8)
-
-    # Cierre morfológico
     if close_ksize > 1:
         kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc, iterations=1)
-
-    # Distancia al borde (usando pm "interior")
-    margen = 3
-    k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (margen, margen))
-    pm_inner = cv2.erode(pm, k_in, iterations=1)
-    if np.count_nonzero(pm_inner) < 50:
-        pm_inner = pm.copy()
-
-    dist_map = cv2.distanceTransform(pm_inner.astype(np.uint8), cv2.DIST_L2, 5)
 
     num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
 
@@ -211,35 +172,81 @@ def detectar_hotspot_local_robusto(
 
     for lab in range(1, num):
         x, y, w, h, area = stats[lab]
+
         if area < min_area:
             continue
 
-        fill_ratio = area / float(w * h + 1e-5)
-        if fill_ratio < min_fill:
+        comp_mask = (labels == lab).astype(np.uint8) * 255
+        cnts, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not cnts:
             continue
 
-        aspect_ratio = max(w / float(h + 1e-5), h / float(w + 1e-5))
-        if aspect_ratio > max_aspect:
+        c = max(cnts, key=cv2.contourArea)
+
+        area_cont = cv2.contourArea(c)
+        if area_cont < min_area:
             continue
 
-        comp_mask = (labels == lab).astype(np.uint8)
-        dvals = dist_map[comp_mask > 0]
-        if dvals.size == 0:
+        # convexidad
+        hull = cv2.convexHull(c)
+        area_hull = cv2.contourArea(hull)
+        if area_hull <= 0:
+            continue
+        solidity = area_cont / float(area_hull)
+
+        # bounding box y extent
+        x_c, y_c, w_c, h_c = cv2.boundingRect(c)
+        box_area = float(w_c * h_c)
+        if box_area <= 0:
+            continue
+        extent = area_cont / box_area
+
+        # relación de aspecto
+        aspect_ratio = max(w_c / float(h_c + 1e-5), h_c / float(w_c + 1e-5))
+
+        # =====================================================
+        # FILTRO COMBINADO POR FORMA
+        # =====================================================
+
+        # 1) muy convexa -> fuera
+        if solidity > 0.88:
             continue
 
-        min_dist = float(np.min(dvals))
-        if min_dist < float(min_dist_edge):
+        # 2) demasiado "rellena" dentro de su caja -> fuera
+        if extent > 0.65:
+            continue
+
+        # 3) demasiado alargada -> fuera
+        if aspect_ratio > 4.0:
+            continue
+        # centroide del componente
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+
+        Hroi, Wroi = roi_bgr.shape[:2]
+
+        # descartar componentes demasiado arriba o demasiado abajo
+        if cy < Hroi * 0.15:
+            continue
+        if cy > Hroi * 0.85:
             continue
 
         good.append(lab)
-        area_total += float(area)
+        area_total += float(area_cont)
+
+        
 
     mask_big = np.zeros_like(mask)
     for lab in good:
         mask_big[labels == lab] = 255
 
-    cnts, _ = cv2.findContours(mask_big, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return mask_big, diff, cnts, area_total, len(cnts)
+    cnts_final, _ = cv2.findContours(mask_big, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return mask_big, diff, cnts_final, area_total, len(cnts_final)
 # ===============================================================
 # INFORME PDF
 # ===============================================================
@@ -774,13 +781,8 @@ with tab_proc:
                         blur_ksize=7,
                         k_sigma=2.2,
                         min_area=40,
-                        close_ksize=7,
-                        min_dist_edge=2.0,   # <- sube un poco si aún hay borde
-                        min_fill=0.12,
-                        max_aspect=6.0,
-                        panel_mask_u8=mask_roi,
-                        crop_top=0.08,
-                        crop_bottom=0.18     # <- prueba 0.15 a 0.22
+                        close_ksize=5,
+                        panel_mask_u8=mask_roi
                     )
 
                     roi_annotated = roi_masked.copy()
@@ -795,14 +797,15 @@ with tab_proc:
                         cv2.drawContours(img_marked, [c2], -1, (0,0,255), 2)
 
                     # Intensidad basada en "diff" (resp)
+                    # Intensidad basada en respuesta térmica
                     intensidad = float(np.max(resp[valid])) if np.any(valid) else 0.0
 
-                    # ✅ más permisivo para interior pequeño, sin dispararse por borde (porque ya lo quitamos)
                     es_hotspot = (num_manchas >= 1) and (
                         (area_total >= 120) or
                         (intensidad >= 1600 and area_total >= 60)
                     )
 
+                    # clasificación de gravedad
                     gravedad = clasificar_gravedad(es_hotspot, intensidad)
 
                     # Guardar HS/OK...
